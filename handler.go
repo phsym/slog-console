@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -12,6 +13,17 @@ import (
 
 var bufferPool = &sync.Pool{
 	New: func() any { return new(buffer) },
+}
+
+func getBuf() *buffer {
+	return bufferPool.Get().(*buffer)
+}
+
+func releaseBuf(buf *buffer) {
+	if buf != nil {
+		buf.Reset()
+		bufferPool.Put(buf)
+	}
 }
 
 var cwd, _ = os.Getwd()
@@ -82,7 +94,8 @@ func (h *Handler) Enabled(_ context.Context, l slog.Level) bool {
 
 // Handle implements slog.Handler.
 func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
-	buf := bufferPool.Get().(*buffer)
+	buf := getBuf()
+	var multiLineBuf *buffer
 
 	h.enc.writeTimestamp(buf, rec.Time)
 	h.enc.writeLevel(buf, rec.Level)
@@ -92,16 +105,40 @@ func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
 	h.enc.writeMessage(buf, rec.Level, rec.Message)
 	buf.copy(&h.context)
 	rec.Attrs(func(a slog.Attr) bool {
+		idx := buf.Len()
 		h.enc.writeAttr(buf, a, h.group)
+		lastAttr := (*buf)[idx:]
+		if bytes.IndexByte(lastAttr, '\n') >= 0 {
+			if multiLineBuf == nil {
+				multiLineBuf = getBuf()
+				multiLineBuf.AppendByte(' ')
+			}
+			if k, v, ok := bytes.Cut(lastAttr, []byte("=")); ok {
+				multiLineBuf.Append(k[1:])
+				multiLineBuf.AppendByte('=')
+				multiLineBuf.AppendByte('\n')
+				multiLineBuf.Append(v)
+				multiLineBuf.AppendByte('\n')
+			} else {
+				multiLineBuf.Append(lastAttr[1:])
+				multiLineBuf.AppendByte('\n')
+			}
+
+			*buf = (*buf)[:idx]
+		}
 		return true
 	})
-	h.enc.NewLine(buf)
+	if multiLineBuf == nil {
+		h.enc.NewLine(buf)
+	}
 	if _, err := buf.WriteTo(h.out); err != nil {
-		buf.Reset()
-		bufferPool.Put(buf)
 		return err
 	}
-	bufferPool.Put(buf)
+	if _, err := multiLineBuf.WriteTo(h.out); err != nil {
+		return err
+	}
+	releaseBuf(buf)
+	releaseBuf(multiLineBuf)
 	return nil
 }
 

@@ -46,6 +46,15 @@ func TestBuffer_WriteTo(t *testing.T) {
 	AssertNoError(t, err)
 	AssertEqual(t, "foobar", dest.String())
 	AssertZero(t, b.Len())
+
+	t.Run("nilbuffer", func(t *testing.T) {
+		// if receiver is nil, do nothing
+		dest.Reset()
+		c, err := (*buffer)(nil).WriteTo(&dest)
+		AssertNoError(t, err)
+		AssertZero(t, c)
+		AssertZero(t, dest.Len())
+	})
 }
 
 func TestBuffer_Clone(t *testing.T) {

@@ -114,6 +114,7 @@ func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		}
 		return
 	}
+
 	buf.AppendByte(' ')
 	e.withColor(buf, e.opts.Theme.AttrKey(), func() {
 		if group != "" {
