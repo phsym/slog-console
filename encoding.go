@@ -86,8 +86,8 @@ func (e encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 		buf.AppendString(frame.File)
 		buf.AppendByte(':')
 		buf.AppendInt(int64(frame.Line))
+		buf.AppendByte(' ')
 	})
-	e.writeColoredString(buf, " > ", e.opts.Theme.AttrKey())
 }
 
 func (e encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
@@ -96,6 +96,26 @@ func (e encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
 	} else {
 		e.writeColoredString(buf, msg, e.opts.Theme.MessageDebug())
 	}
+}
+
+func (e encoder) writeHeaders(buf *buffer, headers []slog.Value) bool {
+	wrote := false
+	for _, a := range headers {
+		// todo: this skips empty values, omitting them entire from the header.
+		// alternately, I could print <null> or something, so the number of
+		// headers in each log entry is always fixed...
+		if a.Kind() == slog.KindAny && a.Any() == nil {
+			continue
+		}
+		e.writeValue(buf, a, e.opts.Theme.Source())
+		buf.AppendByte(' ')
+		wrote = true
+	}
+	return wrote
+}
+
+func (e encoder) writeHeaderSeparator(buf *buffer) {
+	e.writeColoredString(buf, "> ", e.opts.Theme.AttrKey())
 }
 
 func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
@@ -123,38 +143,37 @@ func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		buf.AppendString(a.Key)
 		buf.AppendByte('=')
 	})
-	e.writeValue(buf, value)
+	e.writeValue(buf, value, e.opts.Theme.AttrValue())
 }
 
-func (e encoder) writeValue(buf *buffer, value slog.Value) {
-	attrValue := e.opts.Theme.AttrValue()
+func (e encoder) writeValue(buf *buffer, value slog.Value, c ANSIMod) {
 	switch value.Kind() {
 	case slog.KindInt64:
-		e.writeColoredInt(buf, value.Int64(), attrValue)
+		e.writeColoredInt(buf, value.Int64(), c)
 	case slog.KindBool:
-		e.writeColoredBool(buf, value.Bool(), attrValue)
+		e.writeColoredBool(buf, value.Bool(), c)
 	case slog.KindFloat64:
-		e.writeColoredFloat(buf, value.Float64(), attrValue)
+		e.writeColoredFloat(buf, value.Float64(), c)
 	case slog.KindTime:
-		e.writeColoredTime(buf, value.Time(), e.opts.TimeFormat, attrValue)
+		e.writeColoredTime(buf, value.Time(), e.opts.TimeFormat, c)
 	case slog.KindUint64:
-		e.writeColoredUint(buf, value.Uint64(), attrValue)
+		e.writeColoredUint(buf, value.Uint64(), c)
 	case slog.KindDuration:
-		e.writeColoredDuration(buf, value.Duration(), attrValue)
+		e.writeColoredDuration(buf, value.Duration(), c)
 	case slog.KindAny:
 		switch v := value.Any().(type) {
 		case error:
 			e.writeColoredString(buf, v.Error(), e.opts.Theme.AttrValueError())
 			return
 		case fmt.Stringer:
-			e.writeColoredString(buf, v.String(), attrValue)
+			e.writeColoredString(buf, v.String(), c)
 			return
 		}
 		fallthrough
 	case slog.KindString:
 		fallthrough
 	default:
-		e.writeColoredString(buf, value.String(), attrValue)
+		e.writeColoredString(buf, value.String(), c)
 	}
 }
 
