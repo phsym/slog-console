@@ -282,6 +282,7 @@ func TestThemes(t *testing.T) {
 	for _, theme := range []Theme{
 		NewDefaultTheme(),
 		NewBrightTheme(),
+		NewDimTheme(),
 	} {
 		t.Run(theme.Name(), func(t *testing.T) {
 			level := slog.LevelInfo
@@ -292,6 +293,7 @@ func TestThemes(t *testing.T) {
 			timeFormat := time.Kitchen
 			index := -1
 			toIndex := -1
+			var lastField []byte
 			h := NewHandler(&buf, &HandlerOptions{
 				AddSource:  true,
 				TimeFormat: timeFormat,
@@ -309,6 +311,7 @@ func TestThemes(t *testing.T) {
 					bufBytes = bufBytes[toIndex:]
 					index = bytes.IndexByte(bufBytes, '\x1b')
 					AssertNotEqual(t, -1, index)
+					lastField = bufBytes[:index]
 					toIndex = index + len(ResetMod)
 					AssertEqual(t, ResetMod, ANSIMod(bufBytes[index:toIndex]))
 					bufBytes = bufBytes[toIndex:]
@@ -352,9 +355,16 @@ func TestThemes(t *testing.T) {
 							checkANSIMod(t, "AttrKey", theme.AttrKey())
 						}
 
-						// AttrValue
-						if theme.AttrValue() != "" {
-							checkANSIMod(t, "AttrValue", theme.AttrValue())
+						if string(lastField) == "error=" {
+							// AttrValueError
+							if theme.AttrValueError() != "" {
+								checkANSIMod(t, "AttrValueError", theme.AttrValueError())
+							}
+						} else {
+							// AttrValue
+							if theme.AttrValue() != "" {
+								checkANSIMod(t, "AttrValue", theme.AttrValue())
+							}
 						}
 					}
 				})
