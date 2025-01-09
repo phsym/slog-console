@@ -181,7 +181,7 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 	}
 }
 
-// extractHeaders scans the attributes for keys specified in HeaderKeys.
+// extractHeaders scans the attributes for keys specified in Headers.
 // If found, their values are saved in a new list.
 // The original attribute list will be modified to remove the extracted attributes.
 func (h *Handler) extractHeaders(attrs []slog.Attr) (headers []slog.Value) {
