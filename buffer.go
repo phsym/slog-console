@@ -30,6 +30,10 @@ func (b *buffer) Cap() int {
 }
 
 func (b *buffer) WriteTo(dst io.Writer) (int64, error) {
+	if b == nil {
+		// for convenience, if receiver is nil, treat it like an empty buffer
+		return 0, nil
+	}
 	l := len(*b)
 	if l == 0 {
 		return 0, nil
