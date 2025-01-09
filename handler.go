@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,11 @@ type HandlerOptions struct {
 
 	// Theme defines the colorized output using ANSI escape sequences
 	Theme Theme
+
+	// Headers are a list of attribute keys.  These attributes will be removed from
+	// the trailing attr list, and the values will be inserted between
+	// the level/source and the message, in the configured order.
+	Headers []string
 }
 
 type Handler struct {
@@ -45,6 +51,7 @@ type Handler struct {
 	out     io.Writer
 	group   string
 	context buffer
+	headers []slog.Value
 	enc     *encoder
 }
 
@@ -72,6 +79,7 @@ func NewHandler(out io.Writer, opts *HandlerOptions) *Handler {
 		group:   "",
 		context: nil,
 		enc:     &encoder{opts: *opts},
+		headers: make([]slog.Value, len(opts.Headers)),
 	}
 }
 
@@ -82,31 +90,66 @@ func (h *Handler) Enabled(_ context.Context, l slog.Level) bool {
 
 // Handle implements slog.Handler.
 func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
-	buf := bufferPool.Get().(*buffer)
+	headerBuf, trailerBuf := bufferPool.Get().(*buffer), bufferPool.Get().(*buffer)
 
-	h.enc.writeTimestamp(buf, rec.Time)
-	h.enc.writeLevel(buf, rec.Level)
+	h.enc.writeTimestamp(headerBuf, rec.Time)
+	h.enc.writeLevel(headerBuf, rec.Level)
+
+	var writeHeaderSeparator bool
 	if h.opts.AddSource && rec.PC > 0 {
-		h.enc.writeSource(buf, rec.PC, cwd)
+		h.enc.writeSource(headerBuf, rec.PC, cwd)
+		writeHeaderSeparator = true
 	}
-	h.enc.writeMessage(buf, rec.Level, rec.Message)
-	buf.copy(&h.context)
+
+	h.enc.writeMessage(trailerBuf, rec.Level, rec.Message)
+
+	trailerBuf.copy(&h.context)
+
+	headers := h.headers
+	headersChanged := false
 	rec.Attrs(func(a slog.Attr) bool {
-		h.enc.writeAttr(buf, a, h.group)
+		idx := slices.IndexFunc(h.opts.Headers, func(s string) bool { return s == a.Key })
+		if idx >= 0 {
+			if !headersChanged {
+				headersChanged = true
+				// todo: this makes one allocation, but only if the headers weren't already
+				// satisfied by prior WithAttrs().  Could use a pool of *[]slog.Value, but
+				// I'm not sure it's worth it.
+				headers = make([]slog.Value, len(h.opts.Headers))
+				copy(headers, h.headers)
+			}
+			headers[idx] = a.Value
+		} else {
+			h.enc.writeAttr(trailerBuf, a, h.group)
+		}
 		return true
 	})
-	h.enc.NewLine(buf)
-	if _, err := buf.WriteTo(h.out); err != nil {
-		buf.Reset()
-		bufferPool.Put(buf)
+	h.enc.NewLine(trailerBuf)
+
+	if len(headers) > 0 {
+		if h.enc.writeHeaders(headerBuf, headers) {
+			writeHeaderSeparator = true
+		}
+	}
+
+	if writeHeaderSeparator {
+		h.enc.writeHeaderSeparator(headerBuf)
+	}
+
+	if _, err := headerBuf.WriteTo(h.out); err != nil {
 		return err
 	}
-	bufferPool.Put(buf)
+	if _, err := trailerBuf.WriteTo(h.out); err != nil {
+		return err
+	}
+	bufferPool.Put(headerBuf)
+	bufferPool.Put(trailerBuf)
 	return nil
 }
 
 // WithAttrs implements slog.Handler.
 func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	headers := h.extractHeaders(attrs)
 	newCtx := h.context
 	for _, a := range attrs {
 		h.enc.writeAttr(&newCtx, a, h.group)
@@ -118,6 +161,7 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		group:   h.group,
 		context: newCtx,
 		enc:     h.enc,
+		headers: headers,
 	}
 }
 
@@ -133,5 +177,28 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 		group:   name,
 		context: h.context,
 		enc:     h.enc,
+		headers: h.headers,
 	}
+}
+
+// extractHeaders scans the attributes for keys specified in Headers.
+// If found, their values are saved in a new list.
+// The original attribute list will be modified to remove the extracted attributes.
+func (h *Handler) extractHeaders(attrs []slog.Attr) (headers []slog.Value) {
+	changed := false
+	headers = h.headers
+	for i, attr := range attrs {
+		idx := slices.IndexFunc(h.opts.Headers, func(s string) bool { return s == attr.Key })
+		if idx >= 0 {
+			if !changed {
+				// make a copy of prefixes:
+				headers = make([]slog.Value, len(h.headers))
+				copy(headers, h.headers)
+			}
+			headers[idx] = attr.Value
+			attrs[i] = slog.Attr{} // remove the prefix attribute
+			changed = true
+		}
+	}
+	return
 }

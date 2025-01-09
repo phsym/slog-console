@@ -271,6 +271,152 @@ func TestHandler_Source(t *testing.T) {
 	AssertEqual(t, fmt.Sprintf("%s INF foobar\n", now.Format(time.DateTime)), buf.String())
 }
 
+func TestHandler_Headers(t *testing.T) {
+	pc, file, line, _ := runtime.Caller(0)
+	cwd, _ := os.Getwd()
+	file, _ = filepath.Rel(cwd, file)
+	sourceField := fmt.Sprintf("%s:%d", file, line)
+
+	tests := []struct {
+		name       string
+		opts       HandlerOptions
+		attrs      []slog.Attr
+		withAttrs  []slog.Attr
+		withGroups []string
+		want       string
+	}{
+		{
+			name:  "no headers",
+			attrs: []slog.Attr{slog.String("foo", "bar")},
+			want:  "INF with headers foo=bar\n",
+		},
+		{
+			name: "one header",
+			opts: HandlerOptions{Headers: []string{"foo"}},
+			attrs: []slog.Attr{
+				slog.String("foo", "bar"),
+				slog.String("bar", "baz"),
+			},
+			want: "INF bar > with headers bar=baz\n",
+		},
+		{
+			name: "two headers",
+			opts: HandlerOptions{Headers: []string{"foo", "bar"}},
+			attrs: []slog.Attr{
+				slog.String("foo", "bar"),
+				slog.String("bar", "baz"),
+			},
+			want: "INF bar baz > with headers\n",
+		},
+		{
+			name:  "missing headers",
+			opts:  HandlerOptions{Headers: []string{"foo", "bar"}},
+			attrs: []slog.Attr{slog.String("bar", "baz"), slog.String("baz", "foo")},
+			want:  "INF baz > with headers baz=foo\n",
+		},
+		{
+			name: "missing all headers",
+			opts: HandlerOptions{Headers: []string{"foo", "bar"}},
+			want: "INF with headers\n",
+		},
+		{
+			name: "header and source",
+			opts: HandlerOptions{Headers: []string{"foo"}, AddSource: true},
+			attrs: []slog.Attr{
+				slog.String("foo", "bar"),
+				slog.String("bar", "baz"),
+			},
+			want: "INF " + sourceField + " bar > with headers bar=baz\n",
+		},
+		{
+			name: "withattrs",
+			opts: HandlerOptions{Headers: []string{"foo"}},
+			attrs: []slog.Attr{
+
+				slog.String("bar", "baz"),
+			},
+			withAttrs: []slog.Attr{
+				slog.String("foo", "bar"),
+			},
+			want: "INF bar > with headers bar=baz\n",
+		},
+		{
+			name: "withgroup",
+			opts: HandlerOptions{Headers: []string{"foo", "bar"}},
+			attrs: []slog.Attr{
+				slog.String("bar", "baz"),
+				slog.String("baz", "foo"),
+			},
+			withGroups: []string{"group"},
+			withAttrs: []slog.Attr{
+				slog.String("foo", "bar"),
+			},
+			want: "INF bar baz > with headers group.baz=foo\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			buf := bytes.Buffer{}
+
+			opts := &test.opts
+			opts.NoColor = true
+			var h slog.Handler = NewHandler(&buf, &test.opts)
+			if test.withAttrs != nil {
+				h = h.WithAttrs(test.withAttrs)
+			}
+			for _, g := range test.withGroups {
+				h = h.WithGroup(g)
+			}
+
+			rec := slog.NewRecord(time.Time{}, slog.LevelInfo, "with headers", pc)
+
+			rec.AddAttrs(test.attrs...)
+
+			AssertNoError(t, h.Handle(context.Background(), rec))
+			AssertEqual(t, test.want, buf.String())
+		})
+	}
+
+	t.Run("withAttrs state keeping", func(t *testing.T) {
+		// test to make sure the way that WithAttrs() copies the cached headers doesn't leak
+		// headers back to the parent handler or to subsequent Handle() calls (i.e. ensure that
+		// the headers slice is copied at the right times).
+
+		buf := bytes.Buffer{}
+		h := NewHandler(&buf, &HandlerOptions{
+			Headers:    []string{"foo", "bar"},
+			TimeFormat: "0",
+			NoColor:    true,
+		})
+
+		assertLog := func(t *testing.T, handler slog.Handler, want string, attrs ...slog.Attr) {
+			buf.Reset()
+			rec := slog.NewRecord(time.Time{}, slog.LevelInfo, "with headers", pc)
+
+			rec.AddAttrs(attrs...)
+
+			AssertNoError(t, handler.Handle(context.Background(), rec))
+			AssertEqual(t, want, buf.String())
+		}
+
+		assertLog(t, h, "INF bar > with headers\n", slog.String("foo", "bar"))
+
+		h2 := h.WithAttrs([]slog.Attr{slog.String("foo", "baz")})
+		assertLog(t, h2, "INF baz > with headers\n")
+
+		h3 := h2.WithAttrs([]slog.Attr{slog.String("foo", "buz")})
+		assertLog(t, h3, "INF buz > with headers\n")
+		// creating h3 should not have affected h2
+		assertLog(t, h2, "INF baz > with headers\n")
+
+		// overriding attrs shouldn't affect the handler
+		assertLog(t, h2, "INF biz > with headers\n", slog.String("foo", "biz"))
+		assertLog(t, h2, "INF baz > with headers\n")
+
+	})
+}
+
 func TestHandler_Err(t *testing.T) {
 	w := writerFunc(func(b []byte) (int, error) { return 0, errors.New("nope") })
 	h := NewHandler(w, &HandlerOptions{NoColor: true})
