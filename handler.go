@@ -106,18 +106,13 @@ func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
 	trailerBuf.copy(&h.context)
 
 	headers := h.headers
-	headersChanged := false
+	localHeaders := false
 	rec.Attrs(func(a slog.Attr) bool {
 		idx := slices.IndexFunc(h.opts.Headers, func(s string) bool { return s == a.Key })
 		if idx >= 0 {
-			if !headersChanged {
-				headersChanged = true
-				// todo: I think should could be replace now by a preallocated slice in encoder, avoiding allocation
-				// todo: this makes one allocation, but only if the headers weren't already
-				// satisfied by prior WithAttrs().  Could use a pool of *[]slog.Value, but
-				// I'm not sure it's worth it.
-				headers = make([]slog.Attr, len(h.opts.Headers))
-				copy(headers, h.headers)
+			if !localHeaders {
+				localHeaders = true
+				headers = append(enc.headers, h.headers...)
 			}
 			headers[idx] = a
 			return true

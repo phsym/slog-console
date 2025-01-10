@@ -15,6 +15,7 @@ var encoderPool = &sync.Pool{
 		e.groups = make([]string, 0, 10)
 		e.buf = make(buffer, 0, 1024)
 		e.trailerBuf = make(buffer, 0, 1024)
+		e.headers = make([]slog.Attr, 0, 6)
 		return e
 	},
 }
@@ -23,6 +24,7 @@ type encoder struct {
 	h               *Handler
 	buf, trailerBuf buffer
 	groups          []string
+	headers         []slog.Attr
 }
 
 func newEncoder(h *Handler) *encoder {
@@ -228,9 +230,6 @@ func (e encoder) writeHeaders(buf *buffer, headers []slog.Attr) bool {
 			a = e.h.opts.ReplaceAttr(nil, a)
 			a.Value = a.Value.Resolve()
 		}
-		// todo: this skips empty values, omitting them entire from the header.
-		// alternately, I could print <null> or something, so the number of
-		// headers in each log entry is always fixed...
 		if a.Value.Equal(slog.Value{}) {
 			continue
 		}
