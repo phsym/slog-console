@@ -14,14 +14,15 @@ var encoderPool = &sync.Pool{
 		e := new(encoder)
 		e.groups = make([]string, 0, 10)
 		e.buf = make(buffer, 0, 1024)
+		e.trailerBuf = make(buffer, 0, 1024)
 		return e
 	},
 }
 
 type encoder struct {
-	h      *Handler
-	buf    buffer
-	groups []string
+	h               *Handler
+	buf, trailerBuf buffer
+	groups          []string
 }
 
 func newEncoder(h *Handler) *encoder {
@@ -39,6 +40,7 @@ func (e *encoder) free() {
 	}
 	e.h = nil
 	e.buf.Reset()
+	e.trailerBuf.Reset()
 	e.groups = e.groups[:0]
 	encoderPool.Put(e)
 }
@@ -107,28 +109,25 @@ func (e *encoder) writeTimestamp(buf *buffer, tt time.Time) {
 
 	if e.h.opts.ReplaceAttr != nil {
 		attr := e.h.opts.ReplaceAttr(nil, slog.Time(slog.TimeKey, tt))
-		val := attr.Value.Resolve()
+		attr.Value = attr.Value.Resolve()
 
-		switch val.Kind() {
-		case slog.KindTime:
-			// most common case
-			tt = val.Time()
-			if tt.IsZero() {
-				// elide
-				return
-			}
-			// skip to normal timestamp formatting and printing
-		case slog.KindAny:
-			if val.Any() == nil {
-				// elide
-				return
-			}
-			fallthrough
-		default:
+		if attr.Value.Equal(slog.Value{}) {
+			// elide
+			return
+		}
+
+		if attr.Value.Kind() != slog.KindTime {
 			// handle all non-time values by printing them like
 			// an attr value
-			e.writeColoredValue(buf, val, e.h.opts.Theme.Timestamp())
+			e.writeColoredValue(buf, attr.Value, e.h.opts.Theme.Timestamp())
 			buf.AppendByte(' ')
+			return
+		}
+
+		// most common case
+		tt = attr.Value.Time()
+		if tt.IsZero() {
+			// elide
 			return
 		}
 	}
@@ -137,7 +136,8 @@ func (e *encoder) writeTimestamp(buf *buffer, tt time.Time) {
 	buf.AppendByte(' ')
 }
 
-func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
+// writeSource returns true if source was written, false if elided
+func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) bool {
 	src := slog.Source{}
 
 	if pc > 0 {
@@ -149,18 +149,18 @@ func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 
 	if e.h.opts.ReplaceAttr != nil {
 		attr := e.h.opts.ReplaceAttr(nil, slog.Any(slog.SourceKey, &src))
-		val := attr.Value.Resolve()
+		attr.Value = attr.Value.Resolve()
 
-		switch val.Kind() {
+		if attr.Value.Equal(slog.Value{}) {
+			return false
+		}
+
+		switch attr.Value.Kind() {
 		case slog.KindAny:
-			if val.Any() == nil {
-				// elide
-				return
-			}
-			if newsrc, ok := val.Any().(*slog.Source); ok {
+			if newsrc, ok := attr.Value.Any().(*slog.Source); ok {
 				if newsrc == nil {
 					// elide
-					return
+					return false
 				}
 
 				src.File = newsrc.File
@@ -174,15 +174,15 @@ func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 		default:
 			// handle all non-time values by printing them like
 			// an attr value
-			e.writeColoredValue(buf, val, e.h.opts.Theme.Timestamp())
-			e.writeColoredString(buf, " > ", e.h.opts.Theme.AttrKey())
-			return
+			e.writeColoredValue(buf, attr.Value, e.h.opts.Theme.Timestamp())
+			buf.AppendByte(' ')
+			return true
 		}
 	}
 
 	if src.File == "" && src.Line == 0 {
 		// elide
-		return
+		return false
 	}
 
 	if cwd != "" {
@@ -194,8 +194,10 @@ func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 		buf.AppendString(src.File)
 		buf.AppendByte(':')
 		buf.AppendInt(int64(src.Line))
+		buf.AppendByte(' ')
 	})
-	e.writeColoredString(buf, " > ", e.h.opts.Theme.AttrKey())
+
+	return true
 }
 
 func (e *encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
@@ -206,39 +208,52 @@ func (e *encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
 
 	if e.h.opts.ReplaceAttr != nil {
 		attr := e.h.opts.ReplaceAttr(nil, slog.String(slog.MessageKey, msg))
-		val := attr.Value.Resolve()
-
-		if val.Kind() == slog.KindAny && val.Any() == nil {
+		attr.Value = attr.Value.Resolve()
+		if attr.Value.Equal(slog.Value{}) {
 			// elide
 			return
 		}
 
-		e.writeColoredValue(buf, val, style)
+		e.writeColoredValue(buf, attr.Value, style)
 		return
 	}
 
 	e.writeColoredString(buf, msg, style)
 }
 
+func (e encoder) writeHeaders(buf *buffer, headers []slog.Attr) bool {
+	wrote := false
+	for _, a := range headers {
+		if a.Value.Kind() != slog.KindGroup && e.h.opts.ReplaceAttr != nil {
+			a = e.h.opts.ReplaceAttr(nil, a)
+			a.Value = a.Value.Resolve()
+		}
+		// todo: this skips empty values, omitting them entire from the header.
+		// alternately, I could print <null> or something, so the number of
+		// headers in each log entry is always fixed...
+		if a.Value.Equal(slog.Value{}) {
+			continue
+		}
+		e.writeColoredValue(buf, a.Value, e.h.opts.Theme.Source())
+		buf.AppendByte(' ')
+		wrote = true
+	}
+	return wrote
+}
+
+func (e encoder) writeHeaderSeparator(buf *buffer) {
+	e.writeColoredString(buf, "> ", e.h.opts.Theme.AttrKey())
+}
+
 func (e *encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
+	a.Value = a.Value.Resolve()
+	if a.Value.Kind() != slog.KindGroup && e.h.opts.ReplaceAttr != nil {
+		a = e.h.opts.ReplaceAttr(e.groups, a)
+		a.Value = a.Value.Resolve()
+	}
 	// Elide empty Attrs.
 	if a.Equal(slog.Attr{}) {
 		return
-	}
-	a.Value = a.Value.Resolve()
-
-	if a.Value.Kind() != slog.KindGroup && e.h.opts.ReplaceAttr != nil {
-		// todo: probably inefficient to call Split here.  Need to
-		// cache and maintain the group slice as slog.TextHandler does
-		// this is also causing an allocation (even when this branch
-		// of code is never executed)
-		a = e.h.opts.ReplaceAttr(e.groups, a)
-
-		// Elide empty Attrs.
-		if a.Equal(slog.Attr{}) {
-			return
-		}
-		a.Value = a.Value.Resolve()
 	}
 
 	value := a.Value
@@ -322,19 +337,22 @@ func (e *encoder) writeLevel(buf *buffer, l slog.Level) {
 
 	if e.h.opts.ReplaceAttr != nil {
 		attr := e.h.opts.ReplaceAttr(nil, slog.Any(slog.LevelKey, l))
-		val = attr.Value.Resolve()
-		// generally, we'll write the returned value, except in one
-		// case: when the resolved value is itself a slog.Level
+		attr.Value = attr.Value.Resolve()
+
+		if attr.Value.Equal(slog.Value{}) {
+			// elide
+			return
+		}
+
+		val = attr.Value
 		writeVal = true
 
 		if val.Kind() == slog.KindAny {
-			v := val.Any()
-			if ll, ok := v.(slog.Level); ok {
+			if ll, ok := val.Any().(slog.Level); ok {
+				// generally, we'll write the returned value, except in one
+				// case: when the resolved value is itself a slog.Level
 				l = ll
 				writeVal = false
-			} else if v == nil {
-				// elide
-				return
 			}
 		}
 	}
