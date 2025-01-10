@@ -144,7 +144,13 @@ func (e encoder) writeValue(buf *buffer, value slog.Value) {
 	case slog.KindAny:
 		switch v := value.Any().(type) {
 		case error:
-			e.writeColoredString(buf, v.Error(), e.opts.Theme.AttrValueError())
+			if _, ok := v.(fmt.Formatter); ok {
+				e.withColor(buf, e.opts.Theme.AttrValueError(), func() {
+					fmt.Fprintf(buf, "%+v", v)
+				})
+			} else {
+				e.writeColoredString(buf, v.Error(), e.opts.Theme.AttrValueError())
+			}
 			return
 		case fmt.Stringer:
 			e.writeColoredString(buf, v.String(), attrValue)
