@@ -5,20 +5,50 @@ import (
 	"log/slog"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"sync"
 	"time"
 )
 
-type encoder struct {
-	opts HandlerOptions
+var encoderPool = &sync.Pool{
+	New: func() any {
+		e := new(encoder)
+		e.groups = make([]string, 0, 10)
+		e.buf = make(buffer, 0, 1024)
+		return e
+	},
 }
 
-func (e encoder) NewLine(buf *buffer) {
+type encoder struct {
+	h      *Handler
+	buf    buffer
+	groups []string
+}
+
+func newEncoder(h *Handler) *encoder {
+	e := encoderPool.Get().(*encoder)
+	e.h = h
+	if h.opts.ReplaceAttr != nil {
+		e.groups = append(e.groups, h.groups...)
+	}
+	return e
+}
+
+func (e *encoder) free() {
+	if e == nil {
+		return
+	}
+	e.h = nil
+	e.buf.Reset()
+	e.groups = e.groups[:0]
+	encoderPool.Put(e)
+}
+
+func (e *encoder) NewLine(buf *buffer) {
 	buf.AppendByte('\n')
 }
 
-func (e encoder) withColor(b *buffer, c ANSIMod, f func()) {
-	if c == "" || e.opts.NoColor {
+func (e *encoder) withColor(b *buffer, c ANSIMod, f func()) {
+	if c == "" || e.h.opts.NoColor {
 		f()
 		return
 	}
@@ -27,56 +57,56 @@ func (e encoder) withColor(b *buffer, c ANSIMod, f func()) {
 	b.AppendString(string(ResetMod))
 }
 
-func (e encoder) writeColoredTime(w *buffer, t time.Time, format string, c ANSIMod) {
+func (e *encoder) writeColoredTime(w *buffer, t time.Time, format string, c ANSIMod) {
 	e.withColor(w, c, func() {
 		w.AppendTime(t, format)
 	})
 }
 
-func (e encoder) writeColoredString(w *buffer, s string, c ANSIMod) {
+func (e *encoder) writeColoredString(w *buffer, s string, c ANSIMod) {
 	e.withColor(w, c, func() {
 		w.AppendString(s)
 	})
 }
 
-func (e encoder) writeColoredInt(w *buffer, i int64, c ANSIMod) {
+func (e *encoder) writeColoredInt(w *buffer, i int64, c ANSIMod) {
 	e.withColor(w, c, func() {
 		w.AppendInt(i)
 	})
 }
 
-func (e encoder) writeColoredUint(w *buffer, i uint64, c ANSIMod) {
+func (e *encoder) writeColoredUint(w *buffer, i uint64, c ANSIMod) {
 	e.withColor(w, c, func() {
 		w.AppendUint(i)
 	})
 }
 
-func (e encoder) writeColoredFloat(w *buffer, i float64, c ANSIMod) {
+func (e *encoder) writeColoredFloat(w *buffer, i float64, c ANSIMod) {
 	e.withColor(w, c, func() {
 		w.AppendFloat(i)
 	})
 }
 
-func (e encoder) writeColoredBool(w *buffer, b bool, c ANSIMod) {
+func (e *encoder) writeColoredBool(w *buffer, b bool, c ANSIMod) {
 	e.withColor(w, c, func() {
 		w.AppendBool(b)
 	})
 }
 
-func (e encoder) writeColoredDuration(w *buffer, d time.Duration, c ANSIMod) {
+func (e *encoder) writeColoredDuration(w *buffer, d time.Duration, c ANSIMod) {
 	e.withColor(w, c, func() {
 		w.AppendDuration(d)
 	})
 }
 
-func (e encoder) writeTimestamp(buf *buffer, tt time.Time) {
+func (e *encoder) writeTimestamp(buf *buffer, tt time.Time) {
 	if tt.IsZero() {
 		// elide, and skip ReplaceAttr
 		return
 	}
 
-	if e.opts.ReplaceAttr != nil {
-		attr := e.opts.ReplaceAttr(nil, slog.Time(slog.TimeKey, tt))
+	if e.h.opts.ReplaceAttr != nil {
+		attr := e.h.opts.ReplaceAttr(nil, slog.Time(slog.TimeKey, tt))
 		val := attr.Value.Resolve()
 
 		switch val.Kind() {
@@ -97,17 +127,17 @@ func (e encoder) writeTimestamp(buf *buffer, tt time.Time) {
 		default:
 			// handle all non-time values by printing them like
 			// an attr value
-			e.writeColoredValue(buf, val, e.opts.Theme.Timestamp())
+			e.writeColoredValue(buf, val, e.h.opts.Theme.Timestamp())
 			buf.AppendByte(' ')
 			return
 		}
 	}
 
-	e.writeColoredTime(buf, tt, e.opts.TimeFormat, e.opts.Theme.Timestamp())
+	e.writeColoredTime(buf, tt, e.h.opts.TimeFormat, e.h.opts.Theme.Timestamp())
 	buf.AppendByte(' ')
 }
 
-func (e encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
+func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 	src := slog.Source{}
 
 	if pc > 0 {
@@ -117,8 +147,8 @@ func (e encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 		src.Line = frame.Line
 	}
 
-	if e.opts.ReplaceAttr != nil {
-		attr := e.opts.ReplaceAttr(nil, slog.Any(slog.SourceKey, &src))
+	if e.h.opts.ReplaceAttr != nil {
+		attr := e.h.opts.ReplaceAttr(nil, slog.Any(slog.SourceKey, &src))
 		val := attr.Value.Resolve()
 
 		switch val.Kind() {
@@ -144,8 +174,8 @@ func (e encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 		default:
 			// handle all non-time values by printing them like
 			// an attr value
-			e.writeColoredValue(buf, val, e.opts.Theme.Timestamp())
-			e.writeColoredString(buf, " > ", e.opts.Theme.AttrKey())
+			e.writeColoredValue(buf, val, e.h.opts.Theme.Timestamp())
+			e.writeColoredString(buf, " > ", e.h.opts.Theme.AttrKey())
 			return
 		}
 	}
@@ -160,22 +190,22 @@ func (e encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 			src.File = ff
 		}
 	}
-	e.withColor(buf, e.opts.Theme.Source(), func() {
+	e.withColor(buf, e.h.opts.Theme.Source(), func() {
 		buf.AppendString(src.File)
 		buf.AppendByte(':')
 		buf.AppendInt(int64(src.Line))
 	})
-	e.writeColoredString(buf, " > ", e.opts.Theme.AttrKey())
+	e.writeColoredString(buf, " > ", e.h.opts.Theme.AttrKey())
 }
 
-func (e encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
-	style := e.opts.Theme.Message()
+func (e *encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
+	style := e.h.opts.Theme.Message()
 	if level < slog.LevelInfo {
-		style = e.opts.Theme.MessageDebug()
+		style = e.h.opts.Theme.MessageDebug()
 	}
 
-	if e.opts.ReplaceAttr != nil {
-		attr := e.opts.ReplaceAttr(nil, slog.String(slog.MessageKey, msg))
+	if e.h.opts.ReplaceAttr != nil {
+		attr := e.h.opts.ReplaceAttr(nil, slog.String(slog.MessageKey, msg))
 		val := attr.Value.Resolve()
 
 		if val.Kind() == slog.KindAny && val.Any() == nil {
@@ -190,19 +220,19 @@ func (e encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
 	e.writeColoredString(buf, msg, style)
 }
 
-func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
+func (e *encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 	// Elide empty Attrs.
 	if a.Equal(slog.Attr{}) {
 		return
 	}
 	a.Value = a.Value.Resolve()
 
-	if a.Value.Kind() != slog.KindGroup && e.opts.ReplaceAttr != nil {
+	if a.Value.Kind() != slog.KindGroup && e.h.opts.ReplaceAttr != nil {
 		// todo: probably inefficient to call Split here.  Need to
 		// cache and maintain the group slice as slog.TextHandler does
 		// this is also causing an allocation (even when this branch
 		// of code is never executed)
-		a = e.opts.ReplaceAttr(strings.Split(group, "."), a)
+		a = e.h.opts.ReplaceAttr(e.groups, a)
 
 		// Elide empty Attrs.
 		if a.Equal(slog.Attr{}) {
@@ -218,14 +248,20 @@ func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		if group != "" {
 			subgroup = group + "." + a.Key
 		}
+		if e.h.opts.ReplaceAttr != nil {
+			e.groups = append(e.groups, a.Key)
+		}
 		for _, attr := range value.Group() {
 			e.writeAttr(buf, attr, subgroup)
+		}
+		if e.h.opts.ReplaceAttr != nil {
+			e.groups = e.groups[:len(e.groups)-1]
 		}
 		return
 	}
 	buf.AppendByte(' ')
 
-	e.withColor(buf, e.opts.Theme.AttrKey(), func() {
+	e.withColor(buf, e.h.opts.Theme.AttrKey(), func() {
 		if group != "" {
 			buf.AppendString(group)
 			buf.AppendByte('.')
@@ -233,10 +269,10 @@ func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		buf.AppendString(a.Key)
 		buf.AppendByte('=')
 	})
-	e.writeColoredValue(buf, value, e.opts.Theme.AttrValue())
+	e.writeColoredValue(buf, value, e.h.opts.Theme.AttrValue())
 }
 
-func (e encoder) writeColoredValue(buf *buffer, value slog.Value, c ANSIMod) {
+func (e *encoder) writeColoredValue(buf *buffer, value slog.Value, c ANSIMod) {
 	switch value.Kind() {
 	case slog.KindInt64:
 		e.writeColoredInt(buf, value.Int64(), c)
@@ -245,7 +281,7 @@ func (e encoder) writeColoredValue(buf *buffer, value slog.Value, c ANSIMod) {
 	case slog.KindFloat64:
 		e.writeColoredFloat(buf, value.Float64(), c)
 	case slog.KindTime:
-		e.writeColoredTime(buf, value.Time(), e.opts.TimeFormat, c)
+		e.writeColoredTime(buf, value.Time(), e.h.opts.TimeFormat, c)
 	case slog.KindUint64:
 		e.writeColoredUint(buf, value.Uint64(), c)
 	case slog.KindDuration:
@@ -253,7 +289,7 @@ func (e encoder) writeColoredValue(buf *buffer, value slog.Value, c ANSIMod) {
 	case slog.KindAny:
 		switch v := value.Any().(type) {
 		case error:
-			e.writeColoredString(buf, v.Error(), e.opts.Theme.AttrValueError())
+			e.writeColoredString(buf, v.Error(), e.h.opts.Theme.AttrValueError())
 			return
 		case fmt.Stringer:
 			e.writeColoredString(buf, v.String(), c)
@@ -267,12 +303,12 @@ func (e encoder) writeColoredValue(buf *buffer, value slog.Value, c ANSIMod) {
 	}
 }
 
-func (e encoder) writeLevel(buf *buffer, l slog.Level) {
+func (e *encoder) writeLevel(buf *buffer, l slog.Level) {
 	var val slog.Value
 	var writeVal bool
 
-	if e.opts.ReplaceAttr != nil {
-		attr := e.opts.ReplaceAttr(nil, slog.Any(slog.LevelKey, l))
+	if e.h.opts.ReplaceAttr != nil {
+		attr := e.h.opts.ReplaceAttr(nil, slog.Any(slog.LevelKey, l))
 		val = attr.Value.Resolve()
 		// generally, we'll write the returned value, except in one
 		// case: when the resolved value is itself a slog.Level
@@ -295,23 +331,23 @@ func (e encoder) writeLevel(buf *buffer, l slog.Level) {
 	var delta int
 	switch {
 	case l >= slog.LevelError:
-		style = e.opts.Theme.LevelError()
+		style = e.h.opts.Theme.LevelError()
 		str = "ERR"
 		delta = int(l - slog.LevelError)
 	case l >= slog.LevelWarn:
-		style = e.opts.Theme.LevelWarn()
+		style = e.h.opts.Theme.LevelWarn()
 		str = "WRN"
 		delta = int(l - slog.LevelWarn)
 	case l >= slog.LevelInfo:
-		style = e.opts.Theme.LevelInfo()
+		style = e.h.opts.Theme.LevelInfo()
 		str = "INF"
 		delta = int(l - slog.LevelInfo)
 	case l >= slog.LevelDebug:
-		style = e.opts.Theme.LevelDebug()
+		style = e.h.opts.Theme.LevelDebug()
 		str = "DBG"
 		delta = int(l - slog.LevelDebug)
 	default:
-		style = e.opts.Theme.LevelDebug()
+		style = e.h.opts.Theme.LevelDebug()
 		str = "DBG"
 		delta = int(l - slog.LevelDebug)
 	}

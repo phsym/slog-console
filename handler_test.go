@@ -335,23 +335,30 @@ func TestHandler_ReplaceAttr(t *testing.T) {
 			want: "2010-05-06 07:08:09 INF " + sourceField + " > foobar size=12 color=red l1.flavor=vanilla\n",
 		},
 		{
-			name:   "groups should be empty for builtins",
+			name:   "groups arg",
 			groups: []string{"l1", "l2"},
+			modrec: func(r *slog.Record) {
+				r.Add(slog.Group("l3", slog.String("flavor", "vanilla")))
+				r.Add(slog.Int("weight", 23))
+			},
 			replaceAttr: func(t *testing.T, s []string, a slog.Attr) slog.Attr {
+				wantGroups := []string{"l1", "l2"}
 				switch a.Key {
 				case slog.TimeKey, slog.SourceKey, slog.MessageKey, slog.LevelKey:
 					if len(s) != 0 {
-						t.Errorf("for builtin attrs, expected no groups, got %v", s)
+						t.Errorf("for builtin attr %v, expected no groups, got %v", a.Key, s)
 					}
+				case "flavor":
+					wantGroups = []string{"l1", "l2", "l3"}
+					fallthrough
 				default:
-					wantGroups := []string{"l1", "l2"}
 					if !reflect.DeepEqual(wantGroups, s) {
-						t.Errorf("for other attrs, expected %v, got %v", wantGroups, s)
+						t.Errorf("for %v attr, expected %v, got %v", a.Key, wantGroups, s)
 					}
 				}
-				return a
+				return slog.String(a.Key, a.Key)
 			},
-			want: "2010-05-06 07:08:09 INF " + sourceField + " > foobar l1.l2.size=12 l1.l2.color=red\n",
+			want: "time level source > msg l1.l2.size=size l1.l2.color=color l1.l2.l3.flavor=flavor l1.l2.weight=weight\n",
 		},
 		{
 			name:        "clear timestamp",
@@ -474,7 +481,7 @@ func TestHandler_ReplaceAttr(t *testing.T) {
 			want:        "2010-05-06 07:08:09 INF " + sourceField + " > foobar flavor=vanilla color=red\n",
 		},
 		{
-			name:        "group attrs",
+			name:        "replace with group attrs",
 			replaceAttr: replaceAttrWith("size", slog.Group("l1", slog.String("flavor", "vanilla"))),
 			want:        "2010-05-06 07:08:09 INF " + sourceField + " > foobar l1.flavor=vanilla color=red\n",
 		},

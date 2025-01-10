@@ -46,6 +46,12 @@ func (b *buffer) WriteTo(dst io.Writer) (int64, error) {
 }
 
 func (b *buffer) Reset() {
+	// To reduce peak allocation, return only smaller buffers to the pool.
+	const maxBufferSize = 16 << 10
+	if cap(*b) > maxBufferSize {
+		*b = (*b)[:0:maxBufferSize]
+		return
+	}
 	*b = (*b)[:0]
 }
 

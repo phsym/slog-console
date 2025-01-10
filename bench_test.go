@@ -22,7 +22,9 @@ var handlers = []struct {
 }{
 	{"dummy", &DummyHandler{}},
 	{"console", NewHandler(io.Discard, &HandlerOptions{Level: slog.LevelDebug, AddSource: false})},
+	// {"console-replaceattr", NewHandler(io.Discard, &HandlerOptions{Level: slog.LevelDebug, AddSource: false, ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr { return a }})},
 	{"std-text", slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false})},
+	// {"std-text-replaceattr", slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false, ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr { return a }})},
 	{"std-json", slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false})},
 }
 

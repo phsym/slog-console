@@ -6,13 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"sync"
 	"time"
 )
-
-var bufferPool = &sync.Pool{
-	New: func() any { return new(buffer) },
-}
 
 var cwd, _ = os.Getwd()
 
@@ -46,11 +41,11 @@ type HandlerOptions struct {
 }
 
 type Handler struct {
-	opts    HandlerOptions
-	out     io.Writer
-	group   string
-	context buffer
-	enc     *encoder
+	opts        HandlerOptions
+	out         io.Writer
+	groupPrefix string
+	groups      []string
+	context     buffer
 }
 
 var _ slog.Handler = (*Handler)(nil)
@@ -72,11 +67,10 @@ func NewHandler(out io.Writer, opts *HandlerOptions) *Handler {
 		opts.Theme = NewDefaultTheme()
 	}
 	return &Handler{
-		opts:    *opts, // Copy struct
-		out:     out,
-		group:   "",
-		context: nil,
-		enc:     &encoder{opts: *opts},
+		opts:        *opts, // Copy struct
+		out:         out,
+		groupPrefix: "",
+		context:     nil,
 	}
 }
 
@@ -87,56 +81,58 @@ func (h *Handler) Enabled(_ context.Context, l slog.Level) bool {
 
 // Handle implements slog.Handler.
 func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
-	buf := bufferPool.Get().(*buffer)
+	enc := newEncoder(h)
+	buf := &enc.buf
 
-	h.enc.writeTimestamp(buf, rec.Time)
-	h.enc.writeLevel(buf, rec.Level)
+	enc.writeTimestamp(buf, rec.Time)
+	enc.writeLevel(buf, rec.Level)
 	if h.opts.AddSource {
-		h.enc.writeSource(buf, rec.PC, cwd)
+		enc.writeSource(buf, rec.PC, cwd)
 	}
-	h.enc.writeMessage(buf, rec.Level, rec.Message)
+	enc.writeMessage(buf, rec.Level, rec.Message)
 	buf.copy(&h.context)
 	rec.Attrs(func(a slog.Attr) bool {
-		h.enc.writeAttr(buf, a, h.group)
+		enc.writeAttr(buf, a, h.groupPrefix)
 		return true
 	})
-	h.enc.NewLine(buf)
+	enc.NewLine(buf)
 	if _, err := buf.WriteTo(h.out); err != nil {
-		buf.Reset()
-		bufferPool.Put(buf)
 		return err
 	}
-	bufferPool.Put(buf)
+
+	enc.free()
 	return nil
 }
 
 // WithAttrs implements slog.Handler.
 func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	newCtx := h.context
+	enc := newEncoder(h)
 	for _, a := range attrs {
-		h.enc.writeAttr(&newCtx, a, h.group)
+		enc.writeAttr(&newCtx, a, h.groupPrefix)
 	}
 	newCtx.Clip()
 	return &Handler{
-		opts:    h.opts,
-		out:     h.out,
-		group:   h.group,
-		context: newCtx,
-		enc:     h.enc,
+		opts:        h.opts,
+		out:         h.out,
+		groupPrefix: h.groupPrefix,
+		context:     newCtx,
+		groups:      h.groups,
 	}
 }
 
 // WithGroup implements slog.Handler.
 func (h *Handler) WithGroup(name string) slog.Handler {
 	name = strings.TrimSpace(name)
-	if h.group != "" {
-		name = h.group + "." + name
+	groupPrefix := name
+	if h.groupPrefix != "" {
+		groupPrefix = h.groupPrefix + "." + name
 	}
 	return &Handler{
-		opts:    h.opts,
-		out:     h.out,
-		group:   name,
-		context: h.context,
-		enc:     h.enc,
+		opts:        h.opts,
+		out:         h.out,
+		groupPrefix: groupPrefix,
+		context:     h.context,
+		groups:      append(h.groups, name),
 	}
 }
