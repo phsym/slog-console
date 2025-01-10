@@ -18,6 +18,7 @@ var cwd, _ = os.Getwd()
 
 // HandlerOptions are options for a ConsoleHandler.
 // A zero HandlerOptions consists entirely of default values.
+// ReplaceAttr works identically to [slog.HandlerOptions.ReplaceAttr]
 type HandlerOptions struct {
 	// AddSource causes the handler to compute the source code position
 	// of the log statement and add a SourceKey attribute to the output.
@@ -38,6 +39,10 @@ type HandlerOptions struct {
 
 	// Theme defines the colorized output using ANSI escape sequences
 	Theme Theme
+
+	// ReplaceAttr is called to rewrite each non-group attribute before it is logged.
+	// See [slog.HandlerOptions]
+	ReplaceAttr func(groups []string, a slog.Attr) slog.Attr
 }
 
 type Handler struct {
@@ -86,7 +91,7 @@ func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
 
 	h.enc.writeTimestamp(buf, rec.Time)
 	h.enc.writeLevel(buf, rec.Level)
-	if h.opts.AddSource && rec.PC > 0 {
+	if h.opts.AddSource {
 		h.enc.writeSource(buf, rec.PC, cwd)
 	}
 	h.enc.writeMessage(buf, rec.Level, rec.Message)

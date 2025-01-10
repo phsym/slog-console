@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -69,33 +70,124 @@ func (e encoder) writeColoredDuration(w *buffer, d time.Duration, c ANSIMod) {
 }
 
 func (e encoder) writeTimestamp(buf *buffer, tt time.Time) {
-	if !tt.IsZero() {
-		e.writeColoredTime(buf, tt, e.opts.TimeFormat, e.opts.Theme.Timestamp())
-		buf.AppendByte(' ')
+	if tt.IsZero() {
+		// elide, and skip ReplaceAttr
+		return
 	}
+
+	if e.opts.ReplaceAttr != nil {
+		attr := e.opts.ReplaceAttr(nil, slog.Time(slog.TimeKey, tt))
+		val := attr.Value.Resolve()
+
+		switch val.Kind() {
+		case slog.KindTime:
+			// most common case
+			tt = val.Time()
+			if tt.IsZero() {
+				// elide
+				return
+			}
+			// skip to normal timestamp formatting and printing
+		case slog.KindAny:
+			if val.Any() == nil {
+				// elide
+				return
+			}
+			fallthrough
+		default:
+			// handle all non-time values by printing them like
+			// an attr value
+			e.writeColoredValue(buf, val, e.opts.Theme.Timestamp())
+			buf.AppendByte(' ')
+			return
+		}
+	}
+
+	e.writeColoredTime(buf, tt, e.opts.TimeFormat, e.opts.Theme.Timestamp())
+	buf.AppendByte(' ')
 }
 
 func (e encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
-	frame, _ := runtime.CallersFrames([]uintptr{pc}).Next()
+	src := slog.Source{}
+
+	if pc > 0 {
+		frame, _ := runtime.CallersFrames([]uintptr{pc}).Next()
+		src.Function = frame.Function
+		src.File = frame.File
+		src.Line = frame.Line
+	}
+
+	if e.opts.ReplaceAttr != nil {
+		attr := e.opts.ReplaceAttr(nil, slog.Any(slog.SourceKey, &src))
+		val := attr.Value.Resolve()
+
+		switch val.Kind() {
+		case slog.KindAny:
+			if val.Any() == nil {
+				// elide
+				return
+			}
+			if newsrc, ok := val.Any().(*slog.Source); ok {
+				if newsrc == nil {
+					// elide
+					return
+				}
+
+				src.File = newsrc.File
+				src.Line = newsrc.Line
+				// replaced prior source fields, proceed with normal source processing
+				break
+			}
+			// source replaced with some other type of value,
+			// fallthrough to processing other value types
+			fallthrough
+		default:
+			// handle all non-time values by printing them like
+			// an attr value
+			e.writeColoredValue(buf, val, e.opts.Theme.Timestamp())
+			e.writeColoredString(buf, " > ", e.opts.Theme.AttrKey())
+			return
+		}
+	}
+
+	if src.File == "" && src.Line == 0 {
+		// elide
+		return
+	}
+
 	if cwd != "" {
-		if ff, err := filepath.Rel(cwd, frame.File); err == nil {
-			frame.File = ff
+		if ff, err := filepath.Rel(cwd, src.File); err == nil {
+			src.File = ff
 		}
 	}
 	e.withColor(buf, e.opts.Theme.Source(), func() {
-		buf.AppendString(frame.File)
+		buf.AppendString(src.File)
 		buf.AppendByte(':')
-		buf.AppendInt(int64(frame.Line))
+		buf.AppendInt(int64(src.Line))
 	})
 	e.writeColoredString(buf, " > ", e.opts.Theme.AttrKey())
 }
 
 func (e encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
-	if level >= slog.LevelInfo {
-		e.writeColoredString(buf, msg, e.opts.Theme.Message())
-	} else {
-		e.writeColoredString(buf, msg, e.opts.Theme.MessageDebug())
+	style := e.opts.Theme.Message()
+	if level < slog.LevelInfo {
+		style = e.opts.Theme.MessageDebug()
 	}
+
+	if e.opts.ReplaceAttr != nil {
+		attr := e.opts.ReplaceAttr(nil, slog.String(slog.MessageKey, msg))
+		val := attr.Value.Resolve()
+
+		if val.Kind() == slog.KindAny && val.Any() == nil {
+			// elide
+			return
+		}
+
+		e.writeColoredValue(buf, val, style)
+		return
+	}
+
+	e.writeColoredString(buf, msg, style)
 }
 
 func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
@@ -103,7 +195,24 @@ func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 	if a.Equal(slog.Attr{}) {
 		return
 	}
-	value := a.Value.Resolve()
+	a.Value = a.Value.Resolve()
+
+	if a.Value.Kind() != slog.KindGroup && e.opts.ReplaceAttr != nil {
+		// todo: probably inefficient to call Split here.  Need to
+		// cache and maintain the group slice as slog.TextHandler does
+		// this is also causing an allocation (even when this branch
+		// of code is never executed)
+		a = e.opts.ReplaceAttr(strings.Split(group, "."), a)
+
+		// Elide empty Attrs.
+		if a.Equal(slog.Attr{}) {
+			return
+		}
+		a.Value = a.Value.Resolve()
+	}
+
+	value := a.Value
+
 	if value.Kind() == slog.KindGroup {
 		subgroup := a.Key
 		if group != "" {
@@ -115,6 +224,7 @@ func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		return
 	}
 	buf.AppendByte(' ')
+
 	e.withColor(buf, e.opts.Theme.AttrKey(), func() {
 		if group != "" {
 			buf.AppendString(group)
@@ -123,42 +233,63 @@ func (e encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		buf.AppendString(a.Key)
 		buf.AppendByte('=')
 	})
-	e.writeValue(buf, value)
+	e.writeColoredValue(buf, value, e.opts.Theme.AttrValue())
 }
 
-func (e encoder) writeValue(buf *buffer, value slog.Value) {
-	attrValue := e.opts.Theme.AttrValue()
+func (e encoder) writeColoredValue(buf *buffer, value slog.Value, c ANSIMod) {
 	switch value.Kind() {
 	case slog.KindInt64:
-		e.writeColoredInt(buf, value.Int64(), attrValue)
+		e.writeColoredInt(buf, value.Int64(), c)
 	case slog.KindBool:
-		e.writeColoredBool(buf, value.Bool(), attrValue)
+		e.writeColoredBool(buf, value.Bool(), c)
 	case slog.KindFloat64:
-		e.writeColoredFloat(buf, value.Float64(), attrValue)
+		e.writeColoredFloat(buf, value.Float64(), c)
 	case slog.KindTime:
-		e.writeColoredTime(buf, value.Time(), e.opts.TimeFormat, attrValue)
+		e.writeColoredTime(buf, value.Time(), e.opts.TimeFormat, c)
 	case slog.KindUint64:
-		e.writeColoredUint(buf, value.Uint64(), attrValue)
+		e.writeColoredUint(buf, value.Uint64(), c)
 	case slog.KindDuration:
-		e.writeColoredDuration(buf, value.Duration(), attrValue)
+		e.writeColoredDuration(buf, value.Duration(), c)
 	case slog.KindAny:
 		switch v := value.Any().(type) {
 		case error:
 			e.writeColoredString(buf, v.Error(), e.opts.Theme.AttrValueError())
 			return
 		case fmt.Stringer:
-			e.writeColoredString(buf, v.String(), attrValue)
+			e.writeColoredString(buf, v.String(), c)
 			return
 		}
 		fallthrough
 	case slog.KindString:
 		fallthrough
 	default:
-		e.writeColoredString(buf, value.String(), attrValue)
+		e.writeColoredString(buf, value.String(), c)
 	}
 }
 
 func (e encoder) writeLevel(buf *buffer, l slog.Level) {
+	var val slog.Value
+	var writeVal bool
+
+	if e.opts.ReplaceAttr != nil {
+		attr := e.opts.ReplaceAttr(nil, slog.Any(slog.LevelKey, l))
+		val = attr.Value.Resolve()
+		// generally, we'll write the returned value, except in one
+		// case: when the resolved value is itself a slog.Level
+		writeVal = true
+
+		if val.Kind() == slog.KindAny {
+			v := val.Any()
+			if ll, ok := v.(slog.Level); ok {
+				l = ll
+				writeVal = false
+			} else if v == nil {
+				// elide
+				return
+			}
+		}
+	}
+
 	var style ANSIMod
 	var str string
 	var delta int
@@ -184,9 +315,13 @@ func (e encoder) writeLevel(buf *buffer, l slog.Level) {
 		str = "DBG"
 		delta = int(l - slog.LevelDebug)
 	}
-	if delta != 0 {
-		str = fmt.Sprintf("%s%+d", str, delta)
+	if writeVal {
+		e.writeColoredValue(buf, val, style)
+	} else {
+		if delta != 0 {
+			str = fmt.Sprintf("%s%+d", str, delta)
+		}
+		e.writeColoredString(buf, str, style)
 	}
-	e.writeColoredString(buf, str, style)
 	buf.AppendByte(' ')
 }
