@@ -40,6 +40,7 @@ var attrs = []slog.Attr{
 	slog.Any("err", errors.New("yo")),
 	slog.Group("empty"),
 	slog.Group("group", slog.String("bar", "baz")),
+	slog.String("multi", "foo\nbar"),
 }
 
 var attrsAny = func() (a []any) {

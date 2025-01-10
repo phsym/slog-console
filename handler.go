@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -90,20 +91,21 @@ func (h *Handler) Enabled(_ context.Context, l slog.Level) bool {
 // Handle implements slog.Handler.
 func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
 	enc := newEncoder(h)
-	headerBuf := &enc.buf
+	headerBuf := &enc.headerBuf
+	middleBuf := &enc.middleBuf
 	trailerBuf := &enc.trailerBuf
 
 	enc.writeTimestamp(headerBuf, rec.Time)
 	enc.writeLevel(headerBuf, rec.Level)
 
-	var writeHeaderSeparator bool
+	headerLen := headerBuf.Len()
 	if h.opts.AddSource {
-		writeHeaderSeparator = enc.writeSource(headerBuf, rec.PC, cwd)
+		enc.writeSource(headerBuf, rec.PC, cwd)
 	}
 
-	enc.writeMessage(trailerBuf, rec.Level, rec.Message)
+	enc.writeMessage(middleBuf, rec.Level, rec.Message)
 
-	trailerBuf.copy(&h.context)
+	middleBuf.copy(&h.context)
 
 	headers := h.headers
 	localHeaders := false
@@ -117,27 +119,93 @@ func (h *Handler) Handle(_ context.Context, rec slog.Record) error {
 			headers[idx] = a
 			return true
 		}
-		enc.writeAttr(trailerBuf, a, h.groupPrefix)
+
+		offset := middleBuf.Len()
+		enc.writeAttr(middleBuf, a, h.groupPrefix)
+
+		// check if the last attr written has newlines in it
+		// if so, move it to the trailerBuf
+		lastAttr := (*middleBuf)[offset:]
+		if bytes.IndexByte(lastAttr, '\n') >= 0 {
+			// todo: consider splitting the key and the value
+			// components, so the `key=` can be printed on its
+			// own line, and the value will not share any of its
+			// lines with anything else.  Like:
+			//
+			// INF msg key1=val1
+			// key2=
+			// val2 line 1
+			// val2 line 2
+			// key3=
+			// val3 line 1
+			// val3 line 2
+			//
+			// and maybe consider printing the key for these values
+			// differently, like:
+			//
+			// === key2 ===
+			// val2 line1
+			// val2 line2
+			// === key3 ===
+			// val3 line 1
+			// val3 line 2
+			//
+			// Splitting the key and value doesn't work up here in
+			// Handle() though, because we don't know where the term
+			// control characters are.  Would need to push this
+			// multiline handling deeper into encoder, or pass
+			// offsets back up from writeAttr()
+			//
+			// if k, v, ok := bytes.Cut(lastAttr, []byte("=")); ok {
+			// trailerBuf.AppendString("=== ")
+			// trailerBuf.Append(k[1:])
+			// trailerBuf.AppendString(" ===\n")
+			// trailerBuf.AppendByte('=')
+			// trailerBuf.AppendByte('\n')
+			// trailerBuf.AppendString("---------------------\n")
+			// trailerBuf.Append(v)
+			// trailerBuf.AppendString("\n---------------------\n")
+			// trailerBuf.AppendByte('\n')
+			// } else {
+			// trailerBuf.Append(lastAttr[1:])
+			// trailerBuf.AppendByte('\n')
+			// }
+			trailerBuf.Append(lastAttr)
+
+			// rewind the middle buffer
+			*middleBuf = (*middleBuf)[:offset]
+		}
 		return true
 	})
-	enc.NewLine(trailerBuf)
 
+	// add additional headers after the source
 	if len(headers) > 0 {
-		if enc.writeHeaders(headerBuf, headers) {
-			writeHeaderSeparator = true
-		}
+		enc.writeHeaders(headerBuf, headers)
 	}
 
-	if writeHeaderSeparator {
+	// connect the sections
+	if headerBuf.Len() > headerLen {
 		enc.writeHeaderSeparator(headerBuf)
+	}
+
+	if trailerBuf.Len() == 0 {
+		// if there were no multiline attrs, terminate the line with a newline
+		enc.NewLine(middleBuf)
+	} else {
+		// if there were multiline attrs, write middle <-> trailer separater
+		enc.NewLine(trailerBuf)
 	}
 
 	if _, err := headerBuf.WriteTo(h.out); err != nil {
 		return err
 	}
+	if _, err := middleBuf.WriteTo(h.out); err != nil {
+		return err
+	}
 	if _, err := trailerBuf.WriteTo(h.out); err != nil {
 		return err
 	}
+
 	enc.free()
 	return nil
 }

@@ -13,7 +13,8 @@ var encoderPool = &sync.Pool{
 	New: func() any {
 		e := new(encoder)
 		e.groups = make([]string, 0, 10)
-		e.buf = make(buffer, 0, 1024)
+		e.headerBuf = make(buffer, 0, 1024)
+		e.middleBuf = make(buffer, 0, 1024)
 		e.trailerBuf = make(buffer, 0, 1024)
 		e.headers = make([]slog.Attr, 0, 6)
 		return e
@@ -21,10 +22,10 @@ var encoderPool = &sync.Pool{
 }
 
 type encoder struct {
-	h               *Handler
-	buf, trailerBuf buffer
-	groups          []string
-	headers         []slog.Attr
+	h                                *Handler
+	headerBuf, middleBuf, trailerBuf buffer
+	groups                           []string
+	headers                          []slog.Attr
 }
 
 func newEncoder(h *Handler) *encoder {
@@ -41,7 +42,8 @@ func (e *encoder) free() {
 		return
 	}
 	e.h = nil
-	e.buf.Reset()
+	e.headerBuf.Reset()
+	e.middleBuf.Reset()
 	e.trailerBuf.Reset()
 	e.groups = e.groups[:0]
 	encoderPool.Put(e)
@@ -139,7 +141,7 @@ func (e *encoder) writeTimestamp(buf *buffer, tt time.Time) {
 }
 
 // writeSource returns true if source was written, false if elided
-func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) bool {
+func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) {
 	src := slog.Source{}
 
 	if pc > 0 {
@@ -154,7 +156,7 @@ func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) bool {
 		attr.Value = attr.Value.Resolve()
 
 		if attr.Value.Equal(slog.Value{}) {
-			return false
+			return
 		}
 
 		switch attr.Value.Kind() {
@@ -162,7 +164,7 @@ func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) bool {
 			if newsrc, ok := attr.Value.Any().(*slog.Source); ok {
 				if newsrc == nil {
 					// elide
-					return false
+					return
 				}
 
 				src.File = newsrc.File
@@ -178,13 +180,13 @@ func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) bool {
 			// an attr value
 			e.writeColoredValue(buf, attr.Value, e.h.opts.Theme.Timestamp())
 			buf.AppendByte(' ')
-			return true
+			return
 		}
 	}
 
 	if src.File == "" && src.Line == 0 {
 		// elide
-		return false
+		return
 	}
 
 	if cwd != "" {
@@ -198,8 +200,6 @@ func (e *encoder) writeSource(buf *buffer, pc uintptr, cwd string) bool {
 		buf.AppendInt(int64(src.Line))
 		buf.AppendByte(' ')
 	})
-
-	return true
 }
 
 func (e *encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
@@ -223,8 +223,7 @@ func (e *encoder) writeMessage(buf *buffer, level slog.Level, msg string) {
 	e.writeColoredString(buf, msg, style)
 }
 
-func (e encoder) writeHeaders(buf *buffer, headers []slog.Attr) bool {
-	wrote := false
+func (e encoder) writeHeaders(buf *buffer, headers []slog.Attr) {
 	for _, a := range headers {
 		if a.Value.Kind() != slog.KindGroup && e.h.opts.ReplaceAttr != nil {
 			a = e.h.opts.ReplaceAttr(nil, a)
@@ -235,9 +234,7 @@ func (e encoder) writeHeaders(buf *buffer, headers []slog.Attr) bool {
 		}
 		e.writeColoredValue(buf, a.Value, e.h.opts.Theme.Source())
 		buf.AppendByte(' ')
-		wrote = true
 	}
-	return wrote
 }
 
 func (e encoder) writeHeaderSeparator(buf *buffer) {
@@ -273,6 +270,7 @@ func (e *encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		}
 		return
 	}
+
 	buf.AppendByte(' ')
 
 	e.withColor(buf, e.h.opts.Theme.AttrKey(), func() {

@@ -120,6 +120,73 @@ func TestHandler_Attr(t *testing.T) {
 	AssertEqual(t, expected, buf.String())
 }
 
+func TestHandler_AttrsWithNewlines(t *testing.T) {
+	tests := []struct {
+		name           string
+		msg            string
+		escapeNewlines bool
+		attrs          []slog.Attr
+		want           string
+	}{
+		{
+			name: "single attr",
+			attrs: []slog.Attr{
+				slog.String("foo", "line one\nline two"),
+			},
+			want: "INF multiline attrs foo=line one\nline two\n",
+		},
+		{
+			name: "multiple attrs",
+			attrs: []slog.Attr{
+				slog.String("foo", "line one\nline two"),
+				slog.String("bar", "line three\nline four"),
+			},
+			want: "INF multiline attrs foo=line one\nline two bar=line three\nline four\n",
+		},
+		{
+			name: "sort multiline attrs to end",
+			attrs: []slog.Attr{
+				slog.String("size", "big"),
+				slog.String("foo", "line one\nline two"),
+				slog.String("weight", "heavy"),
+				slog.String("bar", "line three\nline four"),
+				slog.String("color", "red"),
+			},
+			want: "INF multiline attrs size=big weight=heavy color=red foo=line one\nline two bar=line three\nline four\n",
+		},
+		{
+			name: "multiline message",
+			msg:  "multiline\nmessage",
+			want: "INF multiline\nmessage\n",
+		},
+		{
+			name: "preserve leading and trailing newlines",
+			attrs: []slog.Attr{
+				slog.String("foo", "\nline one\nline two\n"),
+			},
+			want: "INF multiline attrs foo=\nline one\nline two\n\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			buf := bytes.Buffer{}
+			h := NewHandler(&buf, &HandlerOptions{NoColor: true})
+
+			msg := test.msg
+			if msg == "" {
+				msg = "multiline attrs"
+			}
+			rec := slog.NewRecord(time.Time{}, slog.LevelInfo, msg, 0)
+			rec.AddAttrs(test.attrs...)
+			AssertNoError(t, h.Handle(context.Background(), rec))
+
+			AssertEqual(t, test.want, buf.String())
+		})
+
+	}
+}
+
 // Handlers should not log groups (or subgroups) without fields.
 // '- If a group has no Attrs (even if it has a non-empty key), ignore it.'
 // https://pkg.go.dev/log/slog@master#Handler
