@@ -45,6 +45,11 @@ func (b *buffer) WriteTo(dst io.Writer) (int64, error) {
 	return int64(n), nil
 }
 
+func (b *buffer) Write(bt []byte) (int, error) {
+	*b = append(*b, bt...)
+	return len(bt), nil
+}
+
 func (b *buffer) Reset() {
 	// To reduce peak allocation, return only smaller buffers to the pool.
 	const maxBufferSize = 16 << 10

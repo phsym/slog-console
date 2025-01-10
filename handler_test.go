@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -73,6 +74,17 @@ func (v *theValuer) LogValue() slog.Value {
 	return slog.StringValue(fmt.Sprintf("The word is '%s'", v.word))
 }
 
+type formatterError struct {
+	error
+}
+
+func (e *formatterError) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('+') {
+		io.WriteString(f, "formatted ")
+	}
+	io.WriteString(f, e.Error())
+}
+
 func TestHandler_Attr(t *testing.T) {
 	buf := bytes.Buffer{}
 	h := NewHandler(&buf, &HandlerOptions{NoColor: true})
@@ -88,6 +100,7 @@ func TestHandler_Attr(t *testing.T) {
 		slog.Duration("dur", time.Second),
 		slog.Group("group", slog.String("foo", "bar"), slog.Group("subgroup", slog.String("foo", "bar"))),
 		slog.Any("err", errors.New("the error")),
+		slog.Any("formattedError", &formatterError{errors.New("the error")}),
 		slog.Any("stringer", theStringer{}),
 		slog.Any("nostringer", noStringer{Foo: "bar"}),
 		// Resolve LogValuer items in addition to Stringer items.
@@ -103,7 +116,7 @@ func TestHandler_Attr(t *testing.T) {
 	)
 	AssertNoError(t, h.Handle(context.Background(), rec))
 
-	expected := fmt.Sprintf("%s INF foobar bool=true int=-12 uint=12 float=3.14 foo=bar time=%s dur=1s group.foo=bar group.subgroup.foo=bar err=the error stringer=stringer nostringer={bar} valuer=The word is 'distant'\n", now.Format(time.DateTime), now.Format(time.DateTime))
+	expected := fmt.Sprintf("%s INF foobar bool=true int=-12 uint=12 float=3.14 foo=bar time=%s dur=1s group.foo=bar group.subgroup.foo=bar err=the error formattedError=formatted the error stringer=stringer nostringer={bar} valuer=The word is 'distant'\n", now.Format(time.DateTime), now.Format(time.DateTime))
 	AssertEqual(t, expected, buf.String())
 }
 
