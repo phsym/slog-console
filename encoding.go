@@ -269,43 +269,50 @@ func (e *encoder) writeAttr(buf *buffer, a slog.Attr, group string) {
 		buf.AppendString(a.Key)
 		buf.AppendByte('=')
 	})
-	e.writeColoredValue(buf, value, e.h.opts.Theme.AttrValue())
+
+	style := e.h.opts.Theme.AttrValue()
+	if value.Kind() == slog.KindAny {
+		if _, ok := value.Any().(error); ok {
+			style = e.h.opts.Theme.AttrValueError()
+		}
+	}
+	e.writeColoredValue(buf, value, style)
 }
 
-func (e *encoder) writeColoredValue(buf *buffer, value slog.Value, c ANSIMod) {
+func (e *encoder) writeColoredValue(buf *buffer, value slog.Value, style ANSIMod) {
 	switch value.Kind() {
 	case slog.KindInt64:
-		e.writeColoredInt(buf, value.Int64(), c)
+		e.writeColoredInt(buf, value.Int64(), style)
 	case slog.KindBool:
-		e.writeColoredBool(buf, value.Bool(), c)
+		e.writeColoredBool(buf, value.Bool(), style)
 	case slog.KindFloat64:
-		e.writeColoredFloat(buf, value.Float64(), c)
+		e.writeColoredFloat(buf, value.Float64(), style)
 	case slog.KindTime:
-		e.writeColoredTime(buf, value.Time(), e.h.opts.TimeFormat, c)
+		e.writeColoredTime(buf, value.Time(), e.h.opts.TimeFormat, style)
 	case slog.KindUint64:
-		e.writeColoredUint(buf, value.Uint64(), c)
+		e.writeColoredUint(buf, value.Uint64(), style)
 	case slog.KindDuration:
-		e.writeColoredDuration(buf, value.Duration(), c)
+		e.writeColoredDuration(buf, value.Duration(), style)
 	case slog.KindAny:
 		switch v := value.Any().(type) {
 		case error:
 			if _, ok := v.(fmt.Formatter); ok {
-				e.withColor(buf, e.opts.Theme.AttrValueError(), func() {
+				e.withColor(buf, style, func() {
 					fmt.Fprintf(buf, "%+v", v)
 				})
 			} else {
-				e.writeColoredString(buf, v.Error(), e.h.opts.Theme.AttrValueError())
+				e.writeColoredString(buf, v.Error(), style)
 			}
 			return
 		case fmt.Stringer:
-			e.writeColoredString(buf, v.String(), c)
+			e.writeColoredString(buf, v.String(), style)
 			return
 		}
 		fallthrough
 	case slog.KindString:
 		fallthrough
 	default:
-		e.writeColoredString(buf, value.String(), c)
+		e.writeColoredString(buf, value.String(), style)
 	}
 }
 
