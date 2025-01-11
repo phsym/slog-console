@@ -22,7 +22,11 @@ var handlers = []struct {
 }{
 	{"dummy", &DummyHandler{}},
 	{"console", NewHandler(io.Discard, &HandlerOptions{Level: slog.LevelDebug, AddSource: false})},
+	// {"console-headers", NewHandler(io.Discard, &HandlerOptions{Headers: []string{"foo"}, Level: slog.LevelDebug, AddSource: false})},
+	// {"console-replaceattr", NewHandler(io.Discard, &HandlerOptions{Level: slog.LevelDebug, AddSource: false, ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr { return a }})},
+	// {"console-headers-replaceattr", NewHandler(io.Discard, &HandlerOptions{Headers: []string{"foo"}, Level: slog.LevelDebug, AddSource: false, ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr { return a }})},
 	{"std-text", slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false})},
+	// {"std-text-replaceattr", slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false, ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr { return a }})},
 	{"std-json", slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false})},
 }
 
@@ -36,6 +40,7 @@ var attrs = []slog.Attr{
 	slog.Any("err", errors.New("yo")),
 	slog.Group("empty"),
 	slog.Group("group", slog.String("bar", "baz")),
+	slog.String("multi", "foo\nbar"),
 }
 
 var attrsAny = func() (a []any) {
